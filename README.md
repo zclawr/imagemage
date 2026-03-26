@@ -43,5 +43,5 @@ The following flags are available:
 ```
 --svd : Independent Multi-Channel Low-Rank Approximation
 --ecb : ECB (Electronic Code Book) Encryption
---mono : RGG Image to Mono
+--mono : RGB Image to Mono
 ```
