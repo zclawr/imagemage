@@ -13,9 +13,10 @@ import matplotlib.pyplot as plt
 root = os.path.dirname(__file__)
 img_lib = os.path.join(root, 'img')
 
-def add_img_to_library(img_path):
+def add_img_to_library(img_path, img_name):
     img_file = img_path.split('/')[-1].strip()
-    img_name = img_file.split('.')[0]
+    if img_name == '':
+        img_name = img_file.split('.')[0]
     img_dir = os.path.join(img_lib, img_name)
     try:
         os.makedirs(img_dir, exist_ok=True)
@@ -38,9 +39,13 @@ def img_to_numpy(img_name):
     return np.array(image, dtype=np.uint8)
 
 def ecb_img(img_np):
-    key = img_np.tobytes()
     # Generate a random 16-byte key (for AES-128)
     key = get_random_bytes(16)
+    if img_np.shape[0] % 2 == 1:
+        img_np = img_np[:-1,:,:]
+    if img_np.shape[1] % 2 == 1:
+        img_np = img_np[:,:-1,:]
+    print(img_np.shape)
     data = img_np.tobytes()
     cipher = AES.new(key, AES.MODE_ECB)
     ciphertext = cipher.encrypt(data)
@@ -127,6 +132,23 @@ def random_channel_walk(img_np):
     new_img = np.astype(new_img, np.uint8)
     return new_img #np.astype(new_img, np.uint8)
 
+def rotate_channels(img_np):
+    brg = np.zeros_like(img_np)
+    brg[:,:,0] = img_np[:,:,2]
+    brg[:,:,1] = img_np[:,:,0]
+    brg[:,:,2] = img_np[:,:,1]
+
+    gbr = np.zeros_like(img_np)
+    gbr[:,:,0] = img_np[:,:,1]
+    gbr[:,:,1] = img_np[:,:,2]
+    gbr[:,:,2] = img_np[:,:,0]
+    return brg, gbr
+
+def invert(img_np):
+    max = np.full(shape=img_np.shape, fill_value=255, dtype=np.uint8)
+    inverted = max - img_np
+    return inverted
+
 def process_img(img_name, args):
     img = img_to_numpy(img_name)
     if args.ecb:
@@ -145,20 +167,30 @@ def process_img(img_name, args):
     if args.rcwalk:
         rcwalk = random_channel_walk(img)
         save_transformed_img('rcwalk', img_name, rcwalk)
+    if args.chrotate:
+        brg, gbr = rotate_channels(img)
+        save_transformed_img('chrotate_brg', img_name, brg)
+        save_transformed_img('chrotate_gbr', img_name, gbr)
+    if args.invert:
+        inv = invert(img)
+        save_transformed_img('inverted', img_name, inv)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process inputs')
     parser.add_argument('--add', default='', type=str)
+    parser.add_argument('--name', default='', type=str)
     parser.add_argument('--input', default='', type=str)
-    parser.add_argument('--ecb', default=False, type=bool)
-    parser.add_argument('--svd', default=False, type=bool)
-    parser.add_argument('--mono', default=False, type=bool)
-    parser.add_argument('--rcwalk', default=False, type=bool)
+    parser.add_argument('--ecb', action="store_true")
+    parser.add_argument('--svd', action="store_true")
+    parser.add_argument('--mono', action="store_true")
+    parser.add_argument('--rcwalk', action="store_true")
+    parser.add_argument('--chrotate', action="store_true")
+    parser.add_argument('--invert', action="store_true")
     args = parser.parse_args()
 
     img_name = args.input
     if len(args.add) > 0:
-        img_name = add_img_to_library(args.add)
+        img_name = add_img_to_library(args.add, args.name)
 
     if(len(img_name) == 0):
         print('Input image path as follows: --input YOUR_PATH_HERE.png')
