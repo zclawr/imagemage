@@ -13,6 +13,12 @@ import matplotlib.pyplot as plt
 root = os.path.dirname(__file__)
 img_lib = os.path.join(root, 'img')
 
+def format_num(n, digits=3):
+    for i in range(1, digits+1):
+        if n < 10 ** i:
+            return ('0' * (digits - i)) + f'{n}'
+    return f"{n}"
+
 def add_img_to_library(img_path, img_name):
     img_file = img_path.split('/')[-1].strip()
     if img_name == '':
@@ -151,16 +157,32 @@ def invert(img_np):
 
 def process_img(img_name, args):
     img = img_to_numpy(img_name)
+    # Remove alpha channel
+    if img.shape[2] == 4:
+        img = img[:,:,:-1]
+    print(f'Image shape (Width, Height, Channels (RGB)): {img.shape}')
+    if img.shape[0] % 2 == 1:
+        img = img[:-1, :, :]
+    if img.shape[1] % 2 == 1:
+        img = img[:, :-1, :]
     if args.ecb:
         ecb, d_ecb = ecb_img(img)
         save_transformed_img('ecb', img_name, ecb)
     if args.svd:
+        index = 0
         for k_r in range(8):
             for k_g in range(8):
                 for k_b in range(8):
                     svd_k = low_rank_approximation_svd_img_per_channel(img, 2 ** k_r, 2 ** k_g, 2 ** k_b)
                     print(svd_k.shape)
-                    save_transformed_img(f'svd_r{2 ** k_r}_g{2 ** k_g}_b{2 ** k_b}', img_name, svd_k)
+                    if args.svd_verbose:
+                        svd_name = f'svd_r{k_r}_g{k_g}_b{k_b}'
+                    else:
+                        svd_name = f'svd_{format_num(index)}'
+                    if args.svd_mono:
+                        svd_k = to_mono(svd_k)
+                    save_transformed_img(svd_name, img_name, svd_k)
+                    index += 1
     if args.mono:
         mono = to_mono(img)
         save_transformed_img('mono', img_name, mono)
@@ -186,10 +208,15 @@ if __name__ == '__main__':
     parser.add_argument('--rcwalk', action="store_true")
     parser.add_argument('--chrotate', action="store_true")
     parser.add_argument('--invert', action="store_true")
+
+    # Advanced options
+    parser.add_argument('--svd_verbose', action="store_true")
+    parser.add_argument('--svd_mono', action="store_true")
     args = parser.parse_args()
 
     img_name = args.input
     if len(args.add) > 0:
+        print(f'Adding {args.name} to library')
         img_name = add_img_to_library(args.add, args.name)
 
     if(len(img_name) == 0):
