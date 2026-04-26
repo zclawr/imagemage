@@ -8,6 +8,7 @@ from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 import binascii
 import matplotlib.pyplot as plt
+import subprocess
 
 # Define constant pathing
 root = os.path.dirname(__file__)
@@ -51,6 +52,10 @@ def ecb_img(img_np):
         img_np = img_np[:-1,:,:]
     if img_np.shape[1] % 2 == 1:
         img_np = img_np[:,:-1,:]
+    if img_np.shape[0] % 4 != 0:
+        img_np = img_np[:-2,:,:]
+    if img_np.shape[1] % 4 != 0:
+        img_np = img_np[:,:-2,:]
     print(img_np.shape)
     data = img_np.tobytes()
     cipher = AES.new(key, AES.MODE_ECB)
@@ -155,6 +160,61 @@ def invert(img_np):
     inverted = max - img_np
     return inverted
 
+def gradient_magnitude(img_np):
+  """
+  img: input image (H,W)
+
+  returns:
+  mg_img: image after applying magnitude of gradient (H,W)
+  """
+  out = np.zeros(shape = img_np.shape)
+  for k in range(img_np.shape[2]):
+    img = img_np[:,:,k]
+    # Apply replicate padding to img
+    pad_img = np.zeros(shape=(img.shape[0] + 2, img.shape[1] + 2), dtype=np.int32)
+    pad_img[1:-1, 1:-1] = img
+    # Top left corner
+    pad_img[0,0] = img[0,0]
+    # Top right corner
+    pad_img[0,-1] = img[0,-1]
+    # Bottom left corner
+    pad_img[-1,0] = img[-1,0]
+    # Bottom right corner
+    pad_img[-1,-1] = img[-1,-1]
+    # Horizontal padding
+    for i in range(0, img.shape[0]):
+        pad_img[i+1, 0] = img[i, 0]
+        pad_img[i+1, -1] = img[i, -1]
+    # Vertical padding
+    for i in range(0, img.shape[1]):
+        pad_img[0, i+1] = img[0, i]
+        pad_img[-1, i+1] = img[-1, i]
+
+    # Apply convolution
+    mg_img = np.zeros(shape=img.shape)
+    sobel_kernel_1 = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.int32)
+    sobel_kernel_2 = np.transpose(sobel_kernel_1)
+    for i in range(pad_img.shape[0] - 2):
+        for j in range(pad_img.shape[1] - 2):
+            local = pad_img[i:i+3, j:j+3]
+            conv_1 = np.sum(np.sum(local * sobel_kernel_1, axis=0), axis=0)
+            conv_2 = np.sum(np.sum(local * sobel_kernel_2, axis=0), axis=0)
+            mg_img[i,j] = np.sqrt((conv_1 ** 2) + (conv_2 ** 2))
+    out[:,:,k] = mg_img
+  return np.array(out, dtype=np.uint8)
+
+def bitslice(img_np):
+    v_bin = np.vectorize(np.binary_repr)
+    bits = v_bin(img_np, width=8)
+    outs = np.zeros(shape=(8, img_np.shape[0], img_np.shape[1], img_np.shape[2]))
+    for i in range(outs.shape[1]):
+        for j in range(outs.shape[2]):
+            for k in range(outs.shape[3]):
+                bitstr = bits[i,j,k]
+                for n in range(8):
+                    outs[n,i,j,k] = int(bitstr[n]) * 255
+    return np.array(outs, dtype=np.uint8)
+
 def process_img(img_name, args):
     img = img_to_numpy(img_name)
     # Remove alpha channel
@@ -183,6 +243,10 @@ def process_img(img_name, args):
                         svd_k = to_mono(svd_k)
                     save_transformed_img(svd_name, img_name, svd_k)
                     index += 1
+        if args.svd_video:
+            dir = os.path.dirname(get_img_path(img_name))
+            subprocess.run(["ffmpeg", "-framerate", "25", "-i", f"{dir}/svd_%03d.png", "-c:v", "libx264", "-pix_fmt", "yuv420p", f"{dir}/svd_video.mp4"]) 
+
     if args.mono:
         mono = to_mono(img)
         save_transformed_img('mono', img_name, mono)
@@ -196,6 +260,16 @@ def process_img(img_name, args):
     if args.invert:
         inv = invert(img)
         save_transformed_img('inverted', img_name, inv)
+    if args.gradient:
+        grad = gradient_magnitude(img)
+        save_transformed_img('gradient', img_name, grad)
+    if args.bitslice:
+        sliced = bitslice(img)
+        for i in range(8):
+            save_transformed_img(f'bitslice_{i}', img_name, sliced[i,:,:,:])
+        if args.bitslice_video:
+            dir = os.path.dirname(get_img_path(img_name))
+            subprocess.run(["ffmpeg", "-framerate", "10", "-i", f"{dir}/bitslice_%01d.png", "-filter_complex", "[0:v]reverse[r];[0:v][r]concat=n=2:v=1:a=0", "-loop", "0", f"{dir}/bitslice_video.gif"]) 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process inputs')
@@ -208,10 +282,15 @@ if __name__ == '__main__':
     parser.add_argument('--rcwalk', action="store_true")
     parser.add_argument('--chrotate', action="store_true")
     parser.add_argument('--invert', action="store_true")
+    parser.add_argument('--gradient', action="store_true")
+    parser.add_argument('--bitslice', action="store_true")
 
     # Advanced options
     parser.add_argument('--svd_verbose', action="store_true")
     parser.add_argument('--svd_mono', action="store_true")
+    parser.add_argument('--svd_video', action="store_true")
+    parser.add_argument('--bitslice_video', action="store_true")
+
     args = parser.parse_args()
 
     img_name = args.input
