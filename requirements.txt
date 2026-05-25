@@ -3,3 +3,4 @@ pycryptodome
 pillow
 matplotlib
 argparse
+pywavelets

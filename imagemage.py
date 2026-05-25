@@ -9,10 +9,29 @@ from Crypto.Random import get_random_bytes
 import binascii
 import matplotlib.pyplot as plt
 import subprocess
+import pywt
 
 # Define constant pathing
 root = os.path.dirname(__file__)
 img_lib = os.path.join(root, 'img')
+
+def get_DCT_transformation_matrix(M):
+  """
+  M: The number of basis vectors (integer)
+
+  return: 
+  A:  DCT transform matrix (M,M)
+  """
+  A = np.zeros(shape=(M,M))
+  for u in range(M):
+    for x in range(M):
+      alpha = np.sqrt(2 / M)
+      if u == 0:
+        alpha = np.sqrt(1 / M)
+
+      A[u,x] = alpha * np.cos((((2 * x) + 1) * u * np.pi) / (2 * M))
+
+  return A
 
 def format_num(n, digits=3):
     for i in range(1, digits+1):
@@ -215,9 +234,197 @@ def bitslice(img_np):
                     outs[n,i,j,k] = int(bitstr[n]) * 255
     return np.array(outs, dtype=np.uint8)
 
+def ideal_lpf(img_np, radius):
+  """
+  img: input image (H,W)
+  radius: Radius for the ideal lowpass filter 
+
+  returns:
+  out: output image after low-pass filter has been applied in the frequency domain
+  """
+  out = np.zeros_like(img_np)
+  for k in range(img_np.shape[2]):
+    img = img_np[:,:,k]
+    H = img.shape[0]
+    W = img.shape[1]
+    kH = 2 * np.ceil(radius)
+    kW = kH
+
+    P = H + kH - 1
+    Q = W + kW - 1
+
+    img_padded = np.zeros(shape=(P,Q))
+    img_padded[:H, :W] = img
+    
+    lpf = np.zeros(shape=(P,Q))
+    for i in range(P):
+        for j in range(Q):
+            dist = np.sqrt(((i - (P / 2)) ** 2) + ((j - (Q / 2)) ** 2))
+            if dist <= radius:
+                lpf[i,j] = 1
+
+    dft_img = np.fft.fft2(img_padded)
+    dft_img = np.fft.fftshift(dft_img)
+
+    prod = dft_img * lpf
+    prod = np.fft.ifftshift(prod)
+    ift = np.real(np.fft.ifft2(prod))
+
+    out[:,:,k] = ift[:H, :W]
+
+  return np.array(out, dtype=np.uint8)
+    
+def convolve(img_np, kernel):
+    """
+    img: input image (H, W)
+    kernel: filter (kH, kW)
+
+    returns:
+    f_img: image filtered in frequency domain (H, W)
+    """
+    out = np.zeros_like(img_np)
+    for i in range(img_np.shape[2]):
+        img = img_np[:,:,i]
+        H = img.shape[0]
+        W = img.shape[1]
+        kH = kernel.shape[0]
+        kW = kernel.shape[1]
+
+        P = H + kH - 1
+        Q = W + kW - 1
+
+        img_padded = np.zeros(shape=(P,Q))
+        img_padded[:H, :W] = img
+
+        kernel_padded = np.zeros(shape=(P,Q))
+        kernel_padded[:kH, :kW] = kernel
+
+        dft_img = np.fft.fft2(img_padded)
+        dft_kernel = np.fft.fft2(kernel_padded)
+
+        prod = dft_img * dft_kernel
+        f_img = np.real(np.fft.ifft2(prod))
+
+        out[:,:,i] = f_img[1:H+1,1:W+1]
+
+    return np.array(out, dtype=np.uint8)
+
+def gaussian_blur(img_np, dirty=True):
+    kernel = np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]]) * (1/16)
+    if dirty:
+        kernel += np.random.uniform(low=0.1, high=0.1, size=kernel.shape)
+    return convolve(img_np, kernel)
+
+def modulo(img_np, mod, channel_linked=True):
+    for i in range(img_np.shape[0]):
+        for j in range(img_np.shape[1]):
+            if channel_linked:
+                if(img_np[i,j,0] >= mod and img_np[i,j,1] >= mod and img_np[i,j,2] >= mod):
+                    img_np[i,j,:] = img_np[i,j,:] % mod
+            else:
+                for k in range(img_np.shape[2]):
+                    img_np[i,j,k] = img_np[i,j,k] % mod
+    return np.array(img_np, dtype=np.uint8)
+
+def adaptive_local_noise_reduction(img_np, var, window_size, tear=True):
+  """
+  noisy_img: image with noise added (H,W)
+  var: overall noise variance
+  window_size: filter window (n,n)
+
+  returns: 
+  fhat_img: estimate of the image after noise removal (H,W) as a numpy ndarray
+  """
+  out = np.zeros_like(img_np)
+  for i in range(img_np.shape[2]):
+    noisy_img = img_np[:,:,i]
+    H,W = noisy_img.shape
+    fhat_img = np.zeros_like(noisy_img)
+    n, _ = window_size 
+    m = n // 2
+    for x in range(H):
+        for y in range(W):
+            filtered = []
+            for i in range(-m, m):
+                for j in range(-m, m):
+                    if x + i < 0 or x + i >= H or y + j < 0 or y + j >= W:
+                        continue
+                    filtered.append(noisy_img[x + i, y + j])
+            filtered = np.array(filtered)
+            zhat = np.mean(filtered)
+            filter_var = np.var(filtered)
+            if not tear:
+                fhat_img[x,y] = noisy_img[x,y] - min(1, var / filter_var) * (noisy_img[x,y] - zhat)
+            else:
+                fhat_img[x,y] = noisy_img[x,y] - (var / filter_var) * (noisy_img[x,y] - zhat)
+    out[:,:,i] = fhat_img
+  return np.array(fhat_img, dtype=np.uint8)
+
+def wavelet(img_np, level):
+    cA_out = []
+    cH_out = []
+    cV_out = []
+    cD_out = []
+    for c in range(img_np.shape[2]):
+        current = img_np[:,:,c]
+        for i in range(level):
+            cA, (cH, cV, cD) = pywt.dwt2(current, 'haar')
+            current = cA
+        cA_out.append(cA)
+        cH_out.append(cH)
+        cV_out.append(cV)
+        cD_out.append(cD)
+    cA_out = np.transpose(np.array(cA_out, dtype=np.uint8), (1, 2, 0))
+    cH_out = np.transpose(np.array(cH_out, dtype=np.uint8), (1, 2, 0))
+    cV_out = np.transpose(np.array(cV_out, dtype=np.uint8), (1, 2, 0))
+    cD_out = np.transpose(np.array(cD_out, dtype=np.uint8), (1, 2, 0))
+    return cA_out, cH_out, cV_out, cD_out
+
+def lossy_dct_transform(img_np, M, p):
+    """
+    img: input image (N,N)
+    M: Block size (integer)
+    p: percent of smallest DCT coefficients that need to be set to zero (floating point between 0 and 1)
+
+    returns: 
+    out: output image after processing (N,N)
+    """
+    if img_np.shape[0] % M != 0:
+        img_np = img_np[:-(img_np.shape[0] % M), :, :]
+    if img_np.shape[1] % M != 0:
+        img_np = img_np[:, :-(img_np.shape[1] % M), :]
+
+    outs = np.zeros_like(img_np)
+    to_zero = int(p * M * M)
+    A = get_DCT_transformation_matrix(M)
+    for k in range(img_np.shape[2]):
+        img = img_np[:,:,k]
+        H,W = img.shape
+        out = np.zeros_like(img)
+
+        for i in range(0, H, M):
+            for j in range(0, W, M):
+                block = img[i:i+M, j:j+M]
+                T = A @ block @ np.transpose(A)
+                if to_zero > 0:
+                    T_1dim = np.reshape(T, shape=(T.shape[0] * T.shape[1]))
+                    idxs_to_zero = np.argsort(np.abs(T_1dim))[:to_zero]
+                    T_1dim[idxs_to_zero] = 0
+                    T = np.reshape(T_1dim, shape=(T.shape[0], T.shape[1]))
+
+                F_prime = np.transpose(A) @ T @ A
+                out[i:i+M, j:j+M] = F_prime
+
+        outs[:,:,k] = np.maximum(out, 0)
+        outs[:,:,k] = np.minimum(out, 255)
+    print(np.sqrt(np.mean(np.mean(np.mean((outs - img_np) ** 2, axis=0), axis=0), axis=0)))
+    return outs.astype(np.uint8)
+
 def process_img(img_name, args):
     img = img_to_numpy(img_name)
     # Remove alpha channel
+    if len(img.shape) == 2:
+        img = np.repeat(img[:,:, np.newaxis], 3, axis=-1)
     if img.shape[2] == 4:
         img = img[:,:,:-1]
     print(f'Image shape (Width, Height, Channels (RGB)): {img.shape}')
@@ -246,6 +453,11 @@ def process_img(img_name, args):
         if args.svd_video:
             dir = os.path.dirname(get_img_path(img_name))
             subprocess.run(["ffmpeg", "-framerate", "25", "-i", f"{dir}/svd_%03d.png", "-c:v", "libx264", "-pix_fmt", "yuv420p", f"{dir}/svd_video.mp4"]) 
+    
+    if args.svd_uniform:
+        for i in range(8):
+            svd_k = low_rank_approximation_svd_img_per_channel(img, 2 ** i, 2 ** i, 2 ** i)
+            save_transformed_img(f'svd_uniform_{i}', img_name, svd_k)
 
     if args.mono:
         mono = to_mono(img)
@@ -270,6 +482,51 @@ def process_img(img_name, args):
         if args.bitslice_video:
             dir = os.path.dirname(get_img_path(img_name))
             subprocess.run(["ffmpeg", "-framerate", "10", "-i", f"{dir}/bitslice_%01d.png", "-filter_complex", "[0:v]reverse[r];[0:v][r]concat=n=2:v=1:a=0", "-loop", "0", f"{dir}/bitslice_video.gif"]) 
+    if args.hardlpf:
+        radii = [200, 100, 75, 50, 25, 10]
+        for i in range(len(radii)):
+            blurred = ideal_lpf(img, radii[i])
+            save_transformed_img(f'hardlpf_{i}', img_name, blurred)
+    if args.gaussblur:
+        current = img
+        for i in range(5):
+            blurred = gaussian_blur(current)
+            save_transformed_img(f'gaussblur_{i}', img_name, blurred)
+            current = blurred
+    if args.modulo:
+        mods = [64, 128, 192, 224, 240]
+        for i in range(len(mods)):
+            result = modulo(img, mods[i])
+            save_transformed_img(f'modulo_{i}', img_name, result)
+    if args.adaptive:
+        var = 0.01
+        window_sizes = [(4,4), (9,9), (16,16)]
+        for i in range(len(window_sizes)):
+            result = adaptive_local_noise_reduction(img, var, window_sizes[i])
+            save_transformed_img(f'adaptive_{i}', img_name, result)
+    if args.wavelet:
+        levels = [1, 2, 3, 4, 5, 6]
+        for i in range(len(levels)):
+            cA, cH, cV, cD = wavelet(img, levels[i])
+            save_transformed_img(f'wavelet_cA_{i}', img_name, cA)
+            save_transformed_img(f'wavelet_cH_{i}', img_name, cH)
+            save_transformed_img(f'wavelet_cV_{i}', img_name, cV)
+            save_transformed_img(f'wavelet_cD_{i}', img_name, cD)
+    if args.lossy_dct:
+        M = 2
+        percents = [0.75, 0.9, 0.975]
+        for i in range(len(percents)):
+            out = lossy_dct_transform(img, M, percents[i])
+            save_transformed_img(f'lossy_dct_{i}', img_name, out)
+    if args.lossy_dct_subtract:
+        M = 2
+        percents = [0.75, 0.9, 0.975]
+        for i in range(len(percents)):
+            out = lossy_dct_transform(img, M, percents[i])
+            out = out - img
+            out = np.maximum(out, 0)
+            out = np.minimum(out, 255)
+            save_transformed_img(f'lossy_dct_sub{i}', img_name, out)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process inputs')
@@ -278,12 +535,20 @@ if __name__ == '__main__':
     parser.add_argument('--input', default='', type=str)
     parser.add_argument('--ecb', action="store_true")
     parser.add_argument('--svd', action="store_true")
+    parser.add_argument('--svd_uniform', action="store_true")
     parser.add_argument('--mono', action="store_true")
     parser.add_argument('--rcwalk', action="store_true")
     parser.add_argument('--chrotate', action="store_true")
     parser.add_argument('--invert', action="store_true")
     parser.add_argument('--gradient', action="store_true")
     parser.add_argument('--bitslice', action="store_true")
+    parser.add_argument('--hardlpf', action="store_true")
+    parser.add_argument('--gaussblur', action="store_true")
+    parser.add_argument('--modulo', action="store_true")
+    parser.add_argument('--adaptive', action="store_true")
+    parser.add_argument('--wavelet', action="store_true")
+    parser.add_argument('--lossy_dct', action="store_true")
+    parser.add_argument('--lossy_dct_subtract', action="store_true")
 
     # Advanced options
     parser.add_argument('--svd_verbose', action="store_true")
