@@ -10,6 +10,8 @@ import binascii
 import matplotlib.pyplot as plt
 import subprocess
 import pywt
+import librosa
+import soundfile as sf
 
 # Define constant pathing
 root = os.path.dirname(__file__)
@@ -380,6 +382,81 @@ def wavelet(img_np, level):
     cD_out = np.transpose(np.array(cD_out, dtype=np.uint8), (1, 2, 0))
     return cA_out, cH_out, cV_out, cD_out
 
+def puzzle(img_np, div):
+    H, W, _ = img_np.shape
+    block_size = int(np.floor(W / div))
+    y_iter = int(np.ceil(H/block_size))
+    result = np.copy(img_np)
+    for i in range(y_iter):
+        for j in range(div):
+            flip = ((i % 2) + j) % 2 == 1
+            axis_to_flip = i % 2
+            if flip:
+                low_h = j * block_size
+                high_h = np.minimum((j+1) * block_size, W-1)
+                low_w = i * block_size
+                high_w = np.minimum((i+1) * block_size, H-1) 
+                flipped_block = np.flip(img_np[low_w : high_w, low_h : high_h, :], axis=axis_to_flip)
+                result[low_w : high_w, low_h : high_h, :] = flipped_block
+    return result
+
+def checker_invert(img_np, div):
+    H, W, _ = img_np.shape
+    block_size = int(np.floor(W / div))
+    y_iter = int(np.ceil(H/block_size))
+    for i in range(y_iter):
+        for j in range(div):
+            flip = ((i % 2) + j) % 2 == 1
+            if flip:
+                low_h = j * block_size
+                high_h = np.minimum((j+1) * block_size, W-1)
+                low_w = i * block_size
+                high_w = np.minimum((i+1) * block_size, H-1) 
+                flipped_block = invert(img_np[low_w : high_w, low_h : high_h, :])
+                img_np[low_w : high_w, low_h : high_h, :] = flipped_block
+    return img_np
+
+def checker_hardlpf(img_np, div):
+    H, W, _ = img_np.shape
+    block_size = int(np.floor(W / div))
+    y_iter = int(np.ceil(H/block_size))
+    for i in range(y_iter):
+        for j in range(div):
+            flip = ((i % 2) + j) % 2 == 1
+            if flip:
+                low_h = j * block_size
+                high_h = np.minimum((j+1) * block_size, W-1)
+                low_w = i * block_size
+                high_w = np.minimum((i+1) * block_size, H-1) 
+                flipped_block = ideal_lpf(img_np[low_w : high_w, low_h : high_h, :], 20)
+                img_np[low_w : high_w, low_h : high_h, :] = flipped_block
+    return img_np
+
+def checker_chrotate(img_np, div):
+    H, W, _ = img_np.shape
+    block_size = int(np.floor(W / div))
+    y_iter = int(np.ceil(H/block_size))
+    for i in range(y_iter):
+        for j in range(div):
+            flip = ((i % 2) + j) % 2 == 1
+            if flip:
+                low_h = j * block_size
+                high_h = np.minimum((j+1) * block_size, W-1)
+                low_w = i * block_size
+                high_w = np.minimum((i+1) * block_size, H-1) 
+                flipped_block, _ = rotate_channels(img_np[low_w : high_w, low_h : high_h, :])
+                img_np[low_w : high_w, low_h : high_h, :] = flipped_block
+    return img_np
+
+def img_to_sound(img_np):
+    audio_signal = librosa.griffinlim(img_np, hop_length=512, n_iter=32)
+    return audio_signal
+
+def sound_to_img(img_np):
+    y, sr = librosa.load('your_file.wav', sr=None)
+    stft = librosa.stft(y, hop_length=512, n_iter=32)
+    return stft, sr
+
 def lossy_dct_transform(img_np, M, p):
     """
     img: input image (N,N)
@@ -417,10 +494,9 @@ def lossy_dct_transform(img_np, M, p):
 
         outs[:,:,k] = np.maximum(out, 0)
         outs[:,:,k] = np.minimum(out, 255)
-    print(np.sqrt(np.mean(np.mean(np.mean((outs - img_np) ** 2, axis=0), axis=0), axis=0)))
     return outs.astype(np.uint8)
 
-def process_img(img_name, args):
+def process_img(img_name, args, is_sound=False):
     img = img_to_numpy(img_name)
     # Remove alpha channel
     if len(img.shape) == 2:
@@ -527,12 +603,39 @@ def process_img(img_name, args):
             out = np.maximum(out, 0)
             out = np.minimum(out, 255)
             save_transformed_img(f'lossy_dct_sub{i}', img_name, out)
+    if args.sharpen:
+        current = img
+        for i in range(5):
+            blurred = gaussian_blur(current, dirty=False)
+            diff = np.minimum(np.maximum(blurred - img, 0), 255)
+            save_transformed_img(f'sharpen_{i}', img_name, diff)
+            current = blurred
+    if args.puzzle:
+        for i in range(1, 9):
+            puzzled = puzzle(img, 2 ** i)
+            save_transformed_img(f'puzzle_{i}', img_name, puzzled)
+    if args.checker_invert:
+        for i in range(1, 9):
+            to_modify = np.copy(img)
+            checkered = checker_invert(to_modify, 2 ** i)
+            save_transformed_img(f'checker_invert_{i}', img_name, checkered)
+    if args.checker_hardlpf:
+            for i in range(1, 9):
+                checkered = checker_hardlpf(img, 2 ** i)
+                save_transformed_img(f'checker_hardlpf_{i}', img_name, checkered)
+    if args.checker_chrotate:
+            for i in range(1, 9):
+                to_modify = np.copy(img)
+                checkered = checker_chrotate(to_modify, 2 ** i)
+                save_transformed_img(f'checker_chrotate_{i}', img_name, checkered)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process inputs')
     parser.add_argument('--add', default='', type=str)
     parser.add_argument('--name', default='', type=str)
     parser.add_argument('--input', default='', type=str)
+    parser.add_argument('--sound', default='', type=str)
+
     parser.add_argument('--ecb', action="store_true")
     parser.add_argument('--svd', action="store_true")
     parser.add_argument('--svd_uniform', action="store_true")
@@ -549,6 +652,11 @@ if __name__ == '__main__':
     parser.add_argument('--wavelet', action="store_true")
     parser.add_argument('--lossy_dct', action="store_true")
     parser.add_argument('--lossy_dct_subtract', action="store_true")
+    parser.add_argument('--sharpen', action="store_true")
+    parser.add_argument('--puzzle', action="store_true")
+    parser.add_argument('--checker_invert', action="store_true")
+    parser.add_argument('--checker_hardlpf', action="store_true")
+    parser.add_argument('--checker_chrotate', action="store_true")
 
     # Advanced options
     parser.add_argument('--svd_verbose', action="store_true")
@@ -558,6 +666,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    is_sound = False
+
+    if args.sound:
+        img_name = args.sound
+        is_sound = True
     img_name = args.input
     if len(args.add) > 0:
         print(f'Adding {args.name} to library')
@@ -566,4 +679,4 @@ if __name__ == '__main__':
     if(len(img_name) == 0):
         print('Input image path as follows: --input YOUR_PATH_HERE.png')
     else:    
-        process_img(img_name, args)
+        process_img(img_name, args, is_sound=is_sound)
