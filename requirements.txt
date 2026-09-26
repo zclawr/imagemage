@@ -4,3 +4,5 @@ pillow
 matplotlib
 argparse
 pywavelets
+pillow_heif
+fbm
